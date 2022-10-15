@@ -1,0 +1,5 @@
+* Copic
+
+Simple Python cli utility for setting wallpapers for multiple monitors on Gnome 3. Hydrapaper is wicked apart from the fact that even the Flatpak image is broken on my system now.
+
+Usage: ~I dunno man~
