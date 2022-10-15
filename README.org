@@ -4,7 +4,7 @@ Simple Python cli utility for setting wallpapers for multiple monitors on Gnome 
 
 ** Requirements
 Python 3
-[[https://pillow.readthedocs.io/en/stable/index.html] [Pillow]]
+[[https://pillow.readthedocs.io/en/stable/index.html][Pillow]]
 
 ** Usage
 ~copic.py image1 image2 ... imageN~
