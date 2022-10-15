@@ -2,4 +2,12 @@
 
 Simple Python cli utility for setting wallpapers for multiple monitors on Gnome 3. Hydrapaper is wicked apart from the fact that even the Flatpak image is broken on my system now.
 
-Usage: ~I dunno man~
+** Requirements
+Python 3
+[[https://pillow.readthedocs.io/en/stable/index.html] [Pillow]]
+
+** Usage
+~copic.py image1 image2 ... imageN~
+- Number of images should match number of monitors.
+- Arrangement of monitors is detected automatically using the output of ~xrandr~, so all you need to do is supply images in the order you want them, from leftmost to rightmost monitor
+
