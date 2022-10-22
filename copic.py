@@ -48,30 +48,61 @@ def set_wallpaper(path: Path):
     # The full path from / must be used for this command
     command = f"gsettings set org.gnome.desktop.background {uri} 'file:///{path}'"
     os.system(command)
-        
-
-def scale_images():
-    pass
 
 
-def join_images(display_data, images, transform="fit"):
+def scale_by_factor(image, factor):
+    new_x = round(image.width * factor)
+    new_y = round(image.height * factor)
+    return image.resize((new_x, new_y))
+
+
+def scale_by_pixels(image, axis, pixels):
+    factor = pixels / image.size[axis]
+    return scale_by_factor(image, factor)
+    
+
+def stretch(mon_xy, image):
+    """Adjust image to fit in monitor viewport ignoring aspect ratio"""
+    return image.resize(mon_xy)
+
+
+def zoom(mon_xy, image):
+    x, y = mon_xy
+    pixeldiffs = (x - image.width, y - image.height)
+    axis = pixeldiffs.index(max(pixeldiffs))
+    scaled = scale_by_pixels(image, axis, mon_xy[axis])
+    cropped = scaled.crop((0, 0, x, y))
+    return cropped
+    
+
+def join_images(display_data, images, transform):
     """Join images according to acquired monitor parameters"""
     viewport = display_data["viewport"]
     monitors = display_data["monitors"]
     wallpaper = Image.new("RGBA", (viewport["x"], viewport["y"]))
     for mon, image in zip(monitors, images):
-        wallpaper.paste(image, (mon["x_offset"], mon["y_offset"]))
+        if transform == "zoom":
+            transformed = zoom((mon["x"], mon["y"]), image)
+        elif transform == "stretch":
+            transformed = stretch((mon["x"], mon["y"]), image)
+        else:
+            transformed = image
+        wallpaper.paste(transformed, (mon["x_offset"], mon["y_offset"]))
     return wallpaper
 
 ## Interface
 
 def main():
+    # Set up cli
     parser = argparse.ArgumentParser("copic")
     parser.add_argument("images", nargs="+")
+    parser.add_argument("--fit", default="zoom")
     args = parser.parse_args()
+
+    # Run the script
     images = [Image.open(f) for f in args.images]
     display_data = get_display_data()
-    merged = join_images(display_data, images)
+    merged = join_images(display_data, images, transform=args.fit)
     wallpath = Path.home() / "copic.png"
     merged.save(wallpath)
     set_wallpaper(wallpath)
