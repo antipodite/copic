@@ -1,13 +1,17 @@
 * Copic
 
 Simple Python cli utility for setting wallpapers for multiple monitors on Gnome 3. Hydrapaper is wicked apart from the fact that even the Flatpak image is broken on my system now.
+As we all know and love, after 20 years GTK file pickers still can't display thumbnails, so I suggest using [[https://github.com/stefanhaustein/TerminalImageViewer][Terminal Image Viewer]] to make a quick selection before setting your wallpapers with this script.
+
+Hopefully someone out there finds this helpful.
 
 ** Requirements
 Python 3
 [[https://pillow.readthedocs.io/en/stable/index.html][Pillow]]
 
 ** Usage
-~copic.py image1 image2 ... imageN~
+~usage: copic [-h] [--fit FIT] images [images ...]~
 - Number of images should match number of monitors.
+- Supported fit options are "zoom" and "stretch"
 - Arrangement of monitors is detected automatically using the output of ~xrandr~, so all you need to do is supply images in the order you want them, from leftmost to rightmost monitor
-
+- If a directory path is supplied instead of an image path for each monitor, images for each monitor are randomly chosen from this directory.

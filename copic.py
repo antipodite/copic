@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import re
 import argparse
+import random
 
 from pathlib import Path
-from string import punctuation
 from PIL import Image
 
+
+IMAGE_EXT = Image.registered_extensions().keys()
+FIT_TYPES = ["zoom", "stretch"]
 
 def get_display_data():
     """Get number and resolution of connected monitors from xrandr.
@@ -66,7 +70,7 @@ def stretch(mon_xy, image):
     return image.resize(mon_xy)
 
 
-def zoom(mon_xy, image):
+def zoom(mon_xy, image, align="center"):
     x, y = mon_xy
     pixeldiffs = (x - image.width, y - image.height)
     axis = pixeldiffs.index(max(pixeldiffs))
@@ -95,13 +99,28 @@ def join_images(display_data, images, transform):
 def main():
     # Set up cli
     parser = argparse.ArgumentParser("copic")
-    parser.add_argument("images", nargs="+")
+    parser.add_argument("images", nargs="+", type=Path)
     parser.add_argument("--fit", default="zoom")
     args = parser.parse_args()
 
-    # Run the script
-    images = [Image.open(f) for f in args.images]
+    # Check input
+    if args.fit not in FIT_TYPES:
+        sys.exit(f"Invalid --fit option '{args.fit}'. Options are: {FIT_TYPES}")
     display_data = get_display_data()
+    n_paths = len(args.images)
+    n_monitors = len(display_data["monitors"])
+    # If a directory is supplied, pick an image for each monitor at random
+    if n_paths == 1 and args.images[0].is_dir():
+        ls = [p for p in args.images[0].iterdir() if p.suffix in IMAGE_EXT]
+        paths = random.choices(ls, k=n_monitors)
+    elif n_paths != n_monitors:
+        sys.exit(f"Number of image paths ({n_paths}) " \
+                 f"does not match number of monitors ({n_monitors})")
+    else:
+        paths = args.images
+
+    # Process images and set wallpaper
+    images = [Image.open(f) for f in paths]
     merged = join_images(display_data, images, transform=args.fit)
     wallpath = Path.home() / "copic.png"
     merged.save(wallpath)
