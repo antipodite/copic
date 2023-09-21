@@ -13,29 +13,33 @@ from PIL import Image
 IMAGE_EXT = Image.registered_extensions().keys()
 FIT_TYPES = ["zoom", "stretch"]
 
+
 def get_display_data():
-    """Get number and resolution of connected monitors from xrandr.
-    Returns monitor X and Y dimensions and offsets, sorted from leftmost
-    to rightmost monitor.
-    """
-    viewport = {}
-    monitors = []
+    result = {"viewport": {}, "monitors": []}
+
+    # Get raw display data
     with os.popen("xrandr -q") as stream:
         lines = stream.readlines()
-        # Get viewport data
-        vx, vy = re.search(r"(?<=current )(\d+) x (\d+)(?=,)", lines[0]).groups()
-        viewport["x"] = int(vx)
-        viewport["y"] = int(vy)
-        # Get monitor data
-        raw_mons = [s for s in filter(lambda l: l.startswith("XWAYLAND"), lines)]
-        for string in raw_mons:
-            is_primary = bool(re.search(r"primary", string))
-            pixstr = re.search(r"\d+x\d+\+\d+\+\d+", string).group()
-            x, y, x_offset, y_offset = [int(i) for i in re.split(r"[x\+]", pixstr)]
-            monitors.append({"x": x, "y": y, "x_offset": x_offset,
-                             "y_offset": y_offset, "primary": is_primary})
-    return {"viewport": viewport,
-            "monitors": sorted(monitors, key=lambda d: d["x_offset"])}
+    if not lines:
+        raise Exception("Copic: xrandr -q output null")
+    
+    # Get viewport data
+    vx, vy = re.search(r"(?<=current )(\d+) x (\d+)(?=,)", lines[0]).groups()
+    result["viewport"] = {"x": int(vx), "y": int(vy)}
+
+    # Get monitor data
+    raw_monitors = [l for l in lines if re.search(r" connected", l)]
+    for line in raw_monitors:
+        dimensions = re.search(r"\d+x\d+\+\d+\+\d+", line).group()
+        x, y, x_offset, y_offset = [int(n) for n in re.split(r"[x\+]", dimensions)]
+        result["monitors"].append({
+            "x": x,
+            "y": y,
+            "x_offset": x_offset,
+            "y_offset": y_offset,
+            "primary": "primary" in line
+        })
+    return result
 
 
 def set_wallpaper(path: Path):
@@ -94,25 +98,43 @@ def join_images(display_data, images, transform):
         wallpaper.paste(transformed, (mon["x_offset"], mon["y_offset"]))
     return wallpaper
 
-## Interface
+
+def recursive_iterdir(path):
+    stack = [path]
+    result = []
+    while stack:
+        curr = stack.pop()
+        for p in curr.iterdir():
+            if p.is_dir():
+                stack.append(p)
+            else:
+                result.append(p)
+    return result
+
 
 def main():
     # Set up cli
     parser = argparse.ArgumentParser("copic")
     parser.add_argument("images", nargs="+", type=Path)
     parser.add_argument("--fit", default="zoom")
+    parser.add_argument("--rec", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
-
+    
     # Check input
     if args.fit not in FIT_TYPES:
         sys.exit(f"Invalid --fit option '{args.fit}'. Options are: {FIT_TYPES}")
     display_data = get_display_data()
     n_paths = len(args.images)
     n_monitors = len(display_data["monitors"])
+    first_path = args.images[0]
     # If a directory is supplied, pick an image for each monitor at random
-    if n_paths == 1 and args.images[0].is_dir():
-        ls = [p for p in args.images[0].iterdir() if p.suffix in IMAGE_EXT]
-        paths = random.choices(ls, k=n_monitors)
+    if n_paths == 1 and first_path.is_dir():
+        if args.rec: # Also choose from subdirs
+            ls = recursive_iterdir(first_path)
+        else:
+            ls = first_path.iterdir()
+        paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
     elif n_paths != n_monitors:
         sys.exit(f"Number of image paths ({n_paths}) " \
                  f"does not match number of monitors ({n_monitors})")
