@@ -5,16 +5,21 @@ import sys
 import re
 import argparse
 import random
+import logging
+import time
+import datetime
 
 from pathlib import Path
 from PIL import Image
-
+from PIL.ImageOps import fit
 
 IMAGE_EXT = Image.registered_extensions().keys()
-FIT_TYPES = ["zoom", "stretch"]
 
 
 def get_display_data():
+    """
+    Get connected display resolution and layout by parsing xrandr output.
+    """
     result = {"viewport": {}, "monitors": []}
 
     # Get raw display data
@@ -22,7 +27,7 @@ def get_display_data():
         lines = stream.readlines()
     if not lines:
         raise Exception("Copic: xrandr -q output null")
-    
+
     # Get viewport data
     vx, vy = re.search(r"(?<=current )(\d+) x (\d+)(?=,)", lines[0]).groups()
     result["viewport"] = {"x": int(vx), "y": int(vy)}
@@ -39,11 +44,16 @@ def get_display_data():
             "y_offset": y_offset,
             "primary": "primary" in line
         })
+    # Make sure monitors are sorted by aspect ratio, so portrait orientation
+    # comes first. This will help us pick images later
+    result["monitors"] = sorted(result["monitors"], key=lambda m: m["x"] / m["y"])
     return result
 
 
 def set_wallpaper(path: Path):
-    """Use gsettings to set the merged wallpaper"""
+    """
+    Use gsettings to set the merged wallpaper
+    """
     uri = "picture-uri"
     # Need to know whether Gnome is set to use dark or light theme to set
     # the wallpaper in the right place
@@ -58,45 +68,31 @@ def set_wallpaper(path: Path):
     os.system(command)
 
 
-def scale_by_factor(image, factor):
-    new_x = round(image.width * factor)
-    new_y = round(image.height * factor)
-    return image.resize((new_x, new_y))
-
-
-def scale_by_pixels(image, axis, pixels):
-    factor = pixels / image.size[axis]
-    return scale_by_factor(image, factor)
-    
-
-def stretch(mon_xy, image):
-    """Adjust image to fit in monitor viewport ignoring aspect ratio"""
-    return image.resize(mon_xy)
-
-
-def zoom(mon_xy, image, align="center"):
-    x, y = mon_xy
-    pixeldiffs = (x - image.width, y - image.height)
-    axis = pixeldiffs.index(max(pixeldiffs))
-    scaled = scale_by_pixels(image, axis, mon_xy[axis])
-    cropped = scaled.crop((0, 0, x, y))
-    return cropped
-    
-
-def join_images(display_data, images, transform):
-    """Join images according to acquired monitor parameters"""
+def join_images(display_data, images, transform=fit):
+    """
+    Join images according to acquired monitor parameters
+    """
     viewport = display_data["viewport"]
     monitors = display_data["monitors"]
     wallpaper = Image.new("RGBA", (viewport["x"], viewport["y"]))
     for mon, image in zip(monitors, images):
-        if transform == "zoom":
-            transformed = zoom((mon["x"], mon["y"]), image)
-        elif transform == "stretch":
-            transformed = stretch((mon["x"], mon["y"]), image)
-        else:
-            transformed = image
+        transformed = transform(image, (mon["x"], mon["y"]))
         wallpaper.paste(transformed, (mon["x_offset"], mon["y_offset"]))
     return wallpaper
+
+
+def pick_transform(mon_xy, image):
+    """
+    Choose the best image transformation based on monitor and image xy
+    """
+    mon_width, mon_height = mon_xy
+    if image.width == mon_width and image.height == mon_height:
+        transform = lambda img: img
+    elif image.width != mon_width or image.height != mon_height:
+        transform = fit
+    else:
+        transform = None
+    return transform
 
 
 def recursive_iterdir(path):
@@ -112,41 +108,101 @@ def recursive_iterdir(path):
     return result
 
 
+def background_loop(path, poll_rate, change_every):
+    """
+    Run in background, changing bg images every specified interval,
+    or if a change in display settings is detected
+    """
+    prev_display_data = {"viewport": {}, "monitors": []}
+    last_change_time = datetime.datetime.now()
+
+    while True:
+        # Get current display data from xrandr
+        display_data = get_display_data()
+        logging.debug(display_data)
+        n_monitors = len(display_data["monitors"])
+
+        # Get time since last wallpaper change
+        timedelta = datetime.datetime.now() - last_change_time
+        logging.debug(f"Time delta: {timedelta}")
+
+        # Check for changes to display configuration
+        if n_monitors != len(prev_display_data["monitors"]):
+            logging.info("Display config change detected")
+            do_change = True
+        # Check whether wallpaper change interval has elapsed
+        elif timedelta.seconds / 60 >= change_every:
+            logging.info(f"Wallpaper change duration ({change_every} min) elapsed")
+            do_change = True
+            last_change_time = datetime.datetime.now()
+        else:
+            do_change = False
+
+        if do_change:
+            ls = path.iterdir()
+            paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
+            images = [Image.open(p) for p in paths]
+            # Sort by images by aspect ratio. Monitors are also sorted by aspect
+            # ratio, so any portrait images are applied to portrait-oriented monitors
+            images = sorted(images, key=lambda img: img.width / img.height)
+            merged = join_images(display_data, images)
+            wallpath = Path.home() / ".copic.png"
+            merged.save(wallpath)
+            set_wallpaper(wallpath)
+
+        prev_display_data = display_data
+        time.sleep(poll_rate)
+
+
 def main():
     # Set up cli
     parser = argparse.ArgumentParser("copic")
     parser.add_argument("images", nargs="+", type=Path)
-    parser.add_argument("--fit", default="zoom")
     parser.add_argument("--rec", action="store_true")
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--log", default="ERROR")
+    parser.add_argument("--save", action="store_false", help="")
+    parser.add_argument("--bg", action="store_true", help="")
+    parser.add_argument("--interval", type=int, default=5)
+    parser.add_argument("--poll_rate", type=int, default=2)
     args = parser.parse_args()
-    
-    # Check input
-    if args.fit not in FIT_TYPES:
-        sys.exit(f"Invalid --fit option '{args.fit}'. Options are: {FIT_TYPES}")
-    display_data = get_display_data()
-    n_paths = len(args.images)
-    n_monitors = len(display_data["monitors"])
-    first_path = args.images[0]
-    # If a directory is supplied, pick an image for each monitor at random
-    if n_paths == 1 and first_path.is_dir():
-        if args.rec: # Also choose from subdirs
-            ls = recursive_iterdir(first_path)
-        else:
-            ls = first_path.iterdir()
-        paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
-    elif n_paths != n_monitors:
-        sys.exit(f"Number of image paths ({n_paths}) " \
-                 f"does not match number of monitors ({n_monitors})")
-    else:
-        paths = args.images
 
-    # Process images and set wallpaper
-    images = [Image.open(f) for f in paths]
-    merged = join_images(display_data, images, transform=args.fit)
-    wallpath = Path.home() / "copic.png"
-    merged.save(wallpath)
-    set_wallpaper(wallpath)
+    # Set up logging
+    numeric_level = getattr(logging, args.log.upper(), None)
+    logging.basicConfig(level=numeric_level)
+
+    # If --bg, set up threading to run in background
+    if args.bg:
+        background_loop(args.images[0], args.poll_rate, args.interval)
+    else:
+        # Get setup info
+        display_data = get_display_data()
+        logging.info(display_data)
+        n_paths = len(args.images)
+        n_monitors = len(display_data["monitors"])
+        first_path = args.images[0]
+
+        # If a directory is supplied, pick an image for each monitor at random
+        if n_paths == 1 and first_path.is_dir():
+            if args.rec: # Also choose from subdirs
+                ls = recursive_iterdir(first_path)
+            else:
+                ls = first_path.iterdir()
+            paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
+        elif n_paths != n_monitors:
+            sys.exit(f"Number of image paths ({n_paths})" +
+                     f" does not match number of monitors ({n_monitors})")
+        else:
+            paths = args.images
+
+        # Process images and set wallpaper
+        images = [Image.open(f) for f in paths]
+        # Sort by images by aspect ratio. Monitors are also sorted by aspect
+        # ratio, so any portrait images are applied to portrait-oriented monitors
+        images = sorted(images, key=lambda img: img.width / img.height)
+        merged = join_images(display_data, images)
+        wallpath = Path.home() / ".copic.png"
+        merged.save(wallpath)
+        set_wallpaper(wallpath)
 
 
 if __name__ == "__main__":
