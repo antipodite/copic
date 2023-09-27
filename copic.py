@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 
 import os
-import sys
 import re
 import argparse
 import random
 import logging
 import time
 import datetime
+import socket
+import threading
 
+from queue import Queue
 from pathlib import Path
 from PIL import Image
 from PIL.ImageOps import fit
 
 IMAGE_EXT = Image.registered_extensions().keys()
-
+HOST = "127.0.0.1"
+PORT = 9999
 
 def get_display_data():
     """
@@ -113,46 +116,105 @@ def background_loop(path, poll_rate, change_every):
     Run in background, changing bg images every specified interval,
     or if a change in display settings is detected
     """
-    prev_display_data = {"viewport": {}, "monitors": []}
+    # Set up command server thread
+    command_queue = Queue()
+    thread = threading.Thread(target=command_listener, args=[command_queue])
+    thread.start()
+
+    # Populate initial data
+    display_data = {"viewport": {}, "monitors": []}
     last_change_time = datetime.datetime.now()
 
+    # Run main loop
     while True:
-        # Get current display data from xrandr
-        display_data = get_display_data()
-        logging.debug(display_data)
-        n_monitors = len(display_data["monitors"])
-
-        # Get time since last wallpaper change
-        timedelta = datetime.datetime.now() - last_change_time
-        logging.debug(f"Time delta: {timedelta}")
-
-        # Check for changes to display configuration
-        if n_monitors != len(prev_display_data["monitors"]):
-            logging.info("Display config change detected")
-            do_change = True
-        # Check whether wallpaper change interval has elapsed
-        elif timedelta.seconds / 60 >= change_every:
-            logging.info(f"Wallpaper change duration ({change_every} min) elapsed")
-            do_change = True
-            last_change_time = datetime.datetime.now()
-        else:
-            do_change = False
-
-        if do_change:
-            ls = path.iterdir()
-            paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
-            images = [Image.open(p) for p in paths]
-            # Sort by images by aspect ratio. Monitors are also sorted by aspect
-            # ratio, so any portrait images are applied to portrait-oriented monitors
-            images = sorted(images, key=lambda img: img.width / img.height)
-            merged = join_images(display_data, images)
-            wallpath = Path.home() / ".copic.png"
-            merged.save(wallpath)
-            set_wallpaper(wallpath)
-
-        prev_display_data = display_data
+        display_data, last_change_time = loop_iter(
+            path,
+            display_data,
+            change_every,
+            last_change_time
+        )
+        command = command_queue.get()
+        logging.info(command)
         time.sleep(poll_rate)
 
+
+def loop_iter(path, prev_display_data, change_every, last_change_time):
+    # Get current display data from xrandr
+    display_data = get_display_data()
+    logging.debug(display_data)
+    n_monitors = len(display_data["monitors"])
+
+    # Get time since last wallpaper change
+    timedelta = datetime.datetime.now() - last_change_time
+    logging.debug(f"Time delta: {timedelta}")
+
+    # Check for changes to display configuration
+    if n_monitors != len(prev_display_data["monitors"]):
+        logging.info("Display config change detected")
+        do_change = True
+        # Check whether wallpaper change interval has elapsed
+    elif timedelta.seconds / 60 >= change_every:
+        logging.info(f"Wallpaper change duration ({change_every} min) elapsed")
+        do_change = True
+        last_change_time = datetime.datetime.now()
+    else:
+        do_change = False
+
+    if do_change:
+        ls = path.iterdir()
+        paths = random.choices([p for p in ls if p.suffix in IMAGE_EXT], k=n_monitors)
+        images = [Image.open(p) for p in paths]
+        # Sort by images by aspect ratio. Monitors are also sorted by aspect
+        # ratio, so any portrait images are applied to portrait-oriented monitors
+        images = sorted(images, key=lambda img: img.width / img.height)
+        merged = join_images(display_data, images)
+        wallpath = Path.home() / ".copic.png"
+        merged.save(wallpath)
+        set_wallpaper(wallpath)
+
+    return display_data, last_change_time
+
+
+def command_listener(command_queue):
+    """
+    Listen for command messages from a socket
+    """
+    logging.info("Copic command server starting")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # Bind the socket to the server
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("localhost", PORT))
+        sock.listen()
+        sock.settimeout(1)
+        
+        while True:
+            logging.info("Copic command server waiting for connection")
+            # Wait for a connection for 1s
+            try:
+                client_socket, address = sock.accept()
+            except socket.timeout:
+                continue
+
+            logging.info(f"Accepted connection from {address[0]}")
+            client_socket.settimeout(1)
+
+            # Receive the data from the client
+            with client_socket:
+                message_chunks = []
+                while True:
+                    try:
+                        data = client_socket.recv(4096)
+                    except socket.timeout:
+                        continue
+                    if not data:
+                        break
+                    message_chunks.append(data)
+
+            # Decode bytestrings to a Python string
+            bytes = b"".join(message_chunks)
+            command = bytes.decode("utf-8")
+            command_queue.put(command)
+        
 
 def main():
     # Set up cli
@@ -162,7 +224,7 @@ def main():
     parser.add_argument("--log", default="ERROR")
     parser.add_argument("--save", action="store_false", help="")
     parser.add_argument("--bg", action="store_true", help="")
-    parser.add_argument("--interval", type=int, default=5)
+    parser.add_argument("--interval", type=float, default=5)
     parser.add_argument("--poll_rate", type=int, default=2)
     args = parser.parse_args()
 
@@ -170,7 +232,7 @@ def main():
     numeric_level = getattr(logging, args.log.upper(), None)
     logging.basicConfig(level=numeric_level)
 
-    # If --bg, set up threading to run in background
+    # Run in background if --bg specified
     if args.bg:
         background_loop(args.images[0], args.poll_rate, args.interval)
     else:
